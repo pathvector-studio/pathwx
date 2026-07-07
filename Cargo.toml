@@ -1,0 +1,20 @@
+[package]
+name = "pathwx"
+version = "0.1.0"
+edition = "2021"
+description = "ネットワーク気象観測所 — L3経路品質の継続観測とトレンド劣化検知CLI"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "5"
+
+[dev-dependencies]
+
+[profile.release]
+strip = true
