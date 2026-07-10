@@ -10,7 +10,7 @@ use pathwx::probe;
 use pathwx::report::sparkline;
 use pathwx::stats::{classify, Baseline, Health, RoundStats};
 use pathwx::storage::{append_round, read_history, RoundRecord};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -92,7 +92,10 @@ fn cmd_init(out: &PathBuf, force: bool) -> Result<ExitCode> {
     std::fs::write(out, Config::example_toml())
         .with_context(|| format!("設定ファイルを書き込めません: {}", out.display()))?;
     println!("サンプル設定ファイルを書き出しました: {}", out.display());
-    println!("編集後、`pathwx probe --config {}` を実行してください", out.display());
+    println!(
+        "編集後、`pathwx probe --config {}` を実行してください",
+        out.display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -111,7 +114,7 @@ fn probe_and_record(cfg: &Config, target: &pathwx::config::Target) -> Result<Rou
     Ok(record)
 }
 
-fn cmd_probe(config_path: &PathBuf) -> Result<ExitCode> {
+fn cmd_probe(config_path: &Path) -> Result<ExitCode> {
     let cfg = Config::load(config_path)?;
     if cfg.targets.is_empty() {
         bail!("設定ファイルにターゲットがありません");
@@ -139,7 +142,7 @@ fn cmd_probe(config_path: &PathBuf) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_watch(config_path: &PathBuf, max_rounds: Option<u64>) -> Result<ExitCode> {
+fn cmd_watch(config_path: &Path, max_rounds: Option<u64>) -> Result<ExitCode> {
     let cfg = Config::load(config_path)?;
     if cfg.targets.is_empty() {
         bail!("設定ファイルにターゲットがありません");
@@ -184,7 +187,7 @@ fn cmd_watch(config_path: &PathBuf, max_rounds: Option<u64>) -> Result<ExitCode>
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_check(config_path: &PathBuf, target_name: Option<&str>) -> Result<ExitCode> {
+fn cmd_check(config_path: &Path, target_name: Option<&str>) -> Result<ExitCode> {
     let cfg = Config::load(config_path)?;
     let data_dir = cfg.resolve_data_dir()?;
 
@@ -205,7 +208,8 @@ fn cmd_check(config_path: &PathBuf, target_name: Option<&str>) -> Result<ExitCod
     for target in &targets {
         // 判定前の履歴を読む (直近ラウンドを含めないため、プローブ前に読む)
         let history_before = read_history(&data_dir, &target.name)?;
-        let history_stats: Vec<RoundStats> = history_before.iter().map(|r| r.stats.clone()).collect();
+        let history_stats: Vec<RoundStats> =
+            history_before.iter().map(|r| r.stats.clone()).collect();
 
         let record = probe_and_record(&cfg, target)?;
         let verdict = classify(
@@ -240,7 +244,7 @@ fn cmd_check(config_path: &PathBuf, target_name: Option<&str>) -> Result<ExitCod
     Ok(ExitCode::from(worst_code))
 }
 
-fn cmd_report(config_path: &PathBuf, target_name: &str, window: usize) -> Result<ExitCode> {
+fn cmd_report(config_path: &Path, target_name: &str, window: usize) -> Result<ExitCode> {
     let cfg = Config::load(config_path)?;
     let data_dir = cfg.resolve_data_dir()?;
 
@@ -287,7 +291,10 @@ fn cmd_report(config_path: &PathBuf, target_name: &str, window: usize) -> Result
     // 直近ラウンドの判定 (残りの履歴をベースラインとして使う)
     if let Some((last, rest)) = history_stats.split_last() {
         let verdict = classify(last, rest, cfg.z_threshold, cfg.min_baseline_rounds);
-        println!("直近ラウンドの判定: {:?} — {}", verdict.health, verdict.reason);
+        println!(
+            "直近ラウンドの判定: {:?} — {}",
+            verdict.health, verdict.reason
+        );
         if let Some(z) = verdict.latency_z {
             println!("  レイテンシ z-score: {z:.2}");
         }

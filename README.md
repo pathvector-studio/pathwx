@@ -1,37 +1,41 @@
-# pathwx — ネットワーク気象観測所
+# pathwx — network weather station
 
-**「壊れているか/いないか」ではなく、「悪くなってきているか」を見るツールです。**
+English | [日本語](README.ja.md)
 
-pathwx (path + 航空気象の "wx") は、指定した宛先への TCP 接続を一定間隔で繰り返し観測し、
-損失率・レイテンシ・ジッタの時系列をプレーンテキスト (JSONL) に蓄積、
-そのターゲット固有の「普段の変動幅」(ベースライン)からの統計的な乖離 (z-score) を見て、
-ゆるやかな劣化を検知する常駐監視 CLI です。
+**This tool doesn't ask "is it broken?" — it asks "is it getting worse?"**
 
-## なぜこのツールが要るのか
+pathwx (path + the aviation-weather "wx") repeatedly probes TCP connect quality to a
+destination, accumulates loss rate / latency / jitter time series as plain-text JSONL,
+and watches for a statistically significant deviation (z-score) from that target's own
+historical baseline — catching gradual degradation long before anything actually breaks.
 
-pathvector-studio の他のツールは、それぞれ別の瞬間・別のレイヤーを見ています。
+## Why this exists
 
-| ツール | 見ているもの |
+Every other tool in pathvector-studio looks at a single moment or a single layer:
+
+| Tool | What it looks at |
 |---|---|
-| [netblame](../netblame) | いま・この1回の接続不良の犯人探し (一発診断) |
-| [ashealth](../ashealth) | AS運用のBGP/RPKI/IRR/PeeringDB整合性 (定期健診) |
-| [driftmap](../driftmap) | LLDPスナップショット間のトポロジ差分 (構成ドリフト) |
-| [bgp-sentinel](../bgp-sentinel) | リアルタイムのBGPハイジャック検知 |
+| [netblame](https://github.com/pathvector-studio/netblame) | Who's at fault for *this one* connection problem, right now (one-shot diagnosis) |
+| [ashealth](https://github.com/pathvector-studio/ashealth) | BGP/RPKI/IRR/PeeringDB consistency for an AS operator (periodic checkup) |
+| [driftmap](https://github.com/pathvector-studio/driftmap) | Topology diffs between LLDP snapshots (configuration drift) |
+| [bgp-sentinel](https://github.com/pathvector-studio/bgp-sentinel) | Real-time BGP hijack detection |
 
-どれも「ある瞬間の状態」か「構成の差分」を見ていて、
-**「経路品質が先週より緩やかに悪化している」という時系列トレンド**を継続的に見るツールがありません。
-ping監視ツールは大抵、固定しきい値 (例: 100ms超えたらアラート) でしか判定できず、
-ノイズの多い回線では常時誤報になり、逆に安定した回線のわずかな異常は検知できません。
+Each of those looks at a single point-in-time state or a configuration diff. None of
+them continuously tracks the **time-series trend** of "this path has been quietly
+getting worse over the last week." Most ping-monitoring tools only support fixed
+thresholds (e.g. alert if RTT > 100ms), which means constant false alarms on noisy
+links and missed early warnings on links that are normally rock-solid.
 
-pathwx はヒストリカルなベースライン (平均+標準偏差) からの **z-score** で判定することで、
-「そのターゲットにとって普段どおりか」を基準にします。障害になる前の「予兆」を捉えるのが狙いです。
+pathwx judges each round against a historical baseline (mean + standard deviation) via
+**z-score**, so the question becomes "is this normal *for this target*?" — the goal is
+to catch the precursor to an outage, not just the outage itself.
 
-## 5分で試す
+## Try it in 5 minutes
 
 ```console
 $ cargo build --release
 $ ./target/release/pathwx init
-サンプル設定ファイルを書き出しました: pathwx.toml
+Sample config file written: pathwx.toml
 
 $ cat pathwx.toml
 # ...
@@ -43,106 +47,120 @@ interval_secs = 60
 samples = 5
 timeout_ms = 1000
 
-# 1ラウンド実行 (ログに追記される)
+# Run one round (appends to the log)
 $ ./target/release/pathwx probe
 TARGET                   SENT       OK      LOSS%    AVG(ms)
 cloudflare-dns              5        5         0%       12.4
 
-# 何度か probe を繰り返して履歴を貯めたあと、ベースラインと比較して判定
+# After a few rounds of history have accumulated, compare the latest round to baseline
 $ ./target/release/pathwx check cloudflare-dns
-cloudflare-dns       [HEALTHY] loss=0% avg=13.1ms — ベースライン範囲内です
+cloudflare-dns       [HEALTHY] loss=0% avg=13.1ms — within baseline range
 
-# 過去ログからベースライン統計とスパークラインを表示
+# Show baseline stats and a recent-history sparkline from the log
 $ ./target/release/pathwx report --target cloudflare-dns --window 20
 === pathwx report: cloudflare-dns ===
-総ラウンド数: 12
-ベースライン (全12ラウンド): 平均レイテンシ=13.20ms 標準偏差=2.10ms 平均損失率=0.0%
-直近12ラウンドのレイテンシ推移: ▂▃▁▄▂▃▂▁▃▂▄▂
-直近ラウンドの判定: Healthy — ベースライン範囲内です
+total rounds: 12
+baseline (12 rounds): mean latency=13.20ms stddev=2.10ms mean loss=0.0%
+last 12 rounds latency trend: ▂▃▁▄▂▃▂▁▃▂▄▂
+latest round verdict: Healthy — within baseline range
 
-# 常駐観測 (Ctrl-Cで終了。各ターゲットのinterval_secsに従って回る)
+# Long-running observation (Ctrl-C to stop; loops per each target's interval_secs)
 $ ./target/release/pathwx watch
 ```
 
-CI・cron から使う場合は `check` の終了コードで分岐できます:
+For CI/cron use, branch on `check`'s exit code:
 
 ```console
 $ pathwx check cloudflare-dns; echo $?
-0   # healthy または insufficient data (履歴不足はエラー扱いにしない)
-1   # degraded (ベースラインからの乖離)
-2   # unreachable (直近ラウンドが全滅) / 実行時エラー
+0   # healthy, or insufficient data (not enough history is not treated as an error)
+1   # degraded (deviation from baseline)
+2   # unreachable (every attempt in the latest round failed) / runtime error
 ```
 
-## サブコマンド
+## Subcommands
 
-| コマンド | 内容 |
+| Command | What it does |
 |---|---|
-| `pathwx init [--out FILE] [--force]` | サンプル設定ファイルを生成 |
-| `pathwx probe` | 全ターゲットに1ラウンド実行し、サマリ表示 + ログ追記 |
-| `pathwx watch [--rounds N]` | 各ターゲットのintervalに従い無限ループ観測 (フォアグラウンド常駐) |
-| `pathwx check [target]` | 1ラウンド実行しベースラインと比較、判定を表示し終了コードを返す |
-| `pathwx report --target NAME [--window N]` | 過去ログからベースラインと直近トレンド(スパークライン)を表示 |
+| `pathwx init [--out FILE] [--force]` | Write a sample config file |
+| `pathwx probe` | Run one round against every target, print a summary, append to the log |
+| `pathwx watch [--rounds N]` | Loop forever, probing each target on its own interval (foreground) |
+| `pathwx check [target]` | Run one round, compare it to baseline, print the verdict, and set the exit code |
+| `pathwx report --target NAME [--window N]` | Show baseline stats and a recent-trend sparkline from the log |
 
-## 設定ファイル (TOML)
+## Configuration (TOML)
 
 ```toml
-# データ保存先 (省略時は ~/.local/share/pathwx)
+# Where to store data (defaults to ~/.local/share/pathwx)
 # data_dir = "/var/lib/pathwx"
 
-# ベースライン計算に使う直近ラウンド数 (省略時は全履歴)
+# How many recent rounds to use for the baseline (defaults to the full history)
 # baseline_window = 200
 
-# 劣化判定のz-scoreしきい値 (既定 2.0)
+# z-score threshold for flagging degradation (default 2.0)
 z_threshold = 2.0
 
-# ベースライン確立に必要な最低ラウンド数 (これ未満は insufficient data)
+# Minimum rounds of history required before a baseline is trusted
+# (fewer than this and pathwx reports "insufficient data")
 min_baseline_rounds = 5
 
 [[targets]]
 name = "cloudflare-dns"
 host = "1.1.1.1"
 port = 443
-interval_secs = 60   # watchでのプローブ間隔(秒)
-samples = 5           # 1ラウンドあたりのTCP connect試行回数
-timeout_ms = 1000     # 1回の接続試行のタイムアウト(ミリ秒)
+interval_secs = 60   # probe interval used by `watch`, in seconds
+samples = 5           # TCP connect attempts per round
+timeout_ms = 1000     # per-attempt connect timeout, in milliseconds
 ```
 
-## データ形式
+## Data format
 
-各ターゲットのログは `<data_dir>/<target名>.jsonl` に1ラウンド1行で追記されます。
-DBを使わないプレーンテキストなので、**git にコミットしてレビューできますし、`jq` や `tail -f` でもそのまま読めます**。
+Each target's log lives at `<data_dir>/<target>.jsonl`, one round per line. Since it's
+plain text with no database involved, **you can commit it to git and review it, or read
+it directly with `jq` or `tail -f`**.
 
 ```json
 {"timestamp":"2026-07-07T11:00:00Z","target":"cloudflare-dns","host":"1.1.1.1","port":443,"attempts":5,"successes":5,"loss_rate":0.0,"mean_latency_ms":12.4,"jitter_ms":1.1}
 ```
 
-## 劣化判定のロジック
+## Degradation logic
 
-1. 直近ラウンドの成功が0件 → **UNREACHABLE**
-2. 履歴ラウンド数が `min_baseline_rounds` 未満 → **INSUFFICIENT DATA** (誤報防止のコールドスタート対応)
-3. 履歴 (直近ラウンドを除く全ラウンド、または `baseline_window` 分) から平均・標準偏差のベースラインを計算
-4. 直近ラウンドの平均レイテンシの z-score が `z_threshold` を超える、または損失率がベースラインから急増 → **DEGRADED**
-5. それ以外 → **HEALTHY**
+1. Every attempt in the latest round failed → **UNREACHABLE**
+2. Fewer than `min_baseline_rounds` of history exist → **INSUFFICIENT DATA** (a
+   cold-start guard against false alarms)
+3. Compute a mean + standard deviation baseline from history (all rounds excluding the
+   latest, or the most recent `baseline_window` rounds)
+4. The latest round's mean latency has a z-score beyond `z_threshold`, or the loss rate
+   spikes well above baseline → **DEGRADED**
+5. Otherwise → **HEALTHY**
 
-固定しきい値ではなく、そのターゲット自身の過去の振る舞いを基準にするのがポイントです。
+The key idea: judge each target against *its own* past behavior instead of a fixed
+threshold that has to be guessed per-network.
 
-## 制約・既知の限界
+## Constraints and known limitations
 
-- **TCP connectベースのみ。ICMP/raw socketは不使用** — netblame と同じ制約で、特権なしで動かせる代わりに「ポートが開いていない宛先」の純粋な疎通性は測れません(将来的なICMPオプションは ROADMAP.md 参照)
-- **`watch` はシングルプロセスのフォアグラウンドループのみ** — systemdなどでデーモン化する運用は利用者側で行ってください。デタッチやsystemdユニットの同梱は今のところありません
-- ターゲットごとに独立したスケジューリングではなく、`watch` は全ターゲット中最短の `interval_secs` でループを回します(MVPとしての単純化。ターゲットごとの正確なタイマーは今後の課題)
-- ベースラインは「平均+標準偏差」のシンプルな統計モデルです。周期的な変動 (時間帯・曜日パターンなど) は考慮しません
-- 1プロセス1マシンでの利用を想定。分散観測・複数拠点からの相関は対象外
+- **TCP connect only — no ICMP or raw sockets.** Same constraint as netblame: it runs
+  without elevated privileges, but that means it can't measure pure reachability to a
+  destination with no open port. An ICMP option is tracked for a future release — see
+  ROADMAP.md.
+- **`watch` is a single-process foreground loop only.** Daemonizing it (systemd unit,
+  detaching, etc.) is left to you; pathwx doesn't ship one yet.
+- **No per-target scheduling.** `watch` loops on the *shortest* `interval_secs` across
+  all configured targets rather than timing each one independently — a deliberate MVP
+  simplification. Accurate per-target timers are a future improvement.
+- **The baseline is a simple mean + standard deviation model.** It does not account for
+  periodic patterns (time-of-day, day-of-week).
+- **Single process, single machine.** No distributed observation or cross-site
+  correlation.
 
-## ライセンス
+## License
 
-MIT License. 詳細は [LICENSE](LICENSE) を参照してください。
+MIT License. See [LICENSE](LICENSE).
 
-## 関連プロジェクト
+## Related projects
 
-- [netblame](../netblame) — 一発診断
-- [ashealth](../ashealth) — AS運用の健康診断
-- [driftmap](../driftmap) — 腐らないネットワーク図
-- [bgp-sentinel](../bgp-sentinel) — リアルタイムBGPハイジャック検知
+- [netblame](https://github.com/pathvector-studio/netblame) — one-shot diagnosis
+- [ashealth](https://github.com/pathvector-studio/ashealth) — AS operations health checks
+- [driftmap](https://github.com/pathvector-studio/driftmap) — network diagrams that don't rot
+- [bgp-sentinel](https://github.com/pathvector-studio/bgp-sentinel) — real-time BGP hijack detection
 
-今後の展望は [ROADMAP.md](ROADMAP.md) を参照してください。
+See [ROADMAP.md](ROADMAP.md) for what's planned next.

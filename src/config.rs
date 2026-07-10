@@ -178,4 +178,77 @@ mod tests {
         let cfg: Config = toml::from_str(Config::example_toml()).unwrap();
         assert_eq!(cfg.targets.len(), 2);
     }
+
+    #[test]
+    fn empty_config_has_no_targets_and_default_thresholds() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.targets.is_empty());
+        assert_eq!(cfg.z_threshold, 2.0);
+        assert_eq!(cfg.min_baseline_rounds, 5);
+        assert_eq!(cfg.data_dir, None);
+        assert_eq!(cfg.baseline_window, None);
+    }
+
+    #[test]
+    fn missing_required_target_field_fails_to_parse() {
+        // `port` has no default, so a target without it must fail parsing
+        // rather than silently defaulting to 0.
+        let toml_str = r#"
+            [[targets]]
+            name = "t1"
+            host = "127.0.0.1"
+        "#;
+        let result: Result<Config, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_target_returns_none_for_unknown_name() {
+        let cfg: Config = toml::from_str(Config::example_toml()).unwrap();
+        assert!(cfg.find_target("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn load_missing_file_returns_error() {
+        let result = Config::load(Path::new(
+            "/nonexistent/pathwx-config-that-does-not-exist.toml",
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_reads_and_parses_file_from_disk() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "pathwx-config-test-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, Config::example_toml()).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.targets.len(), 2);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn resolve_data_dir_prefers_configured_value() {
+        let cfg = Config {
+            data_dir: Some(PathBuf::from("/custom/data/dir")),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolve_data_dir().unwrap(),
+            PathBuf::from("/custom/data/dir")
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_falls_back_to_default_when_unset() {
+        let cfg = Config::default();
+        let resolved = cfg.resolve_data_dir().unwrap();
+        assert!(resolved.ends_with("pathwx"));
+    }
 }

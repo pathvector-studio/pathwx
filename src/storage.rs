@@ -38,7 +38,8 @@ pub fn append_round(data_dir: &Path, record: &RoundRecord) -> Result<()> {
         .open(&path)
         .with_context(|| format!("ログファイルを開けません: {}", path.display()))?;
     let line = serde_json::to_string(record).context("レコードのシリアライズに失敗しました")?;
-    writeln!(file, "{line}").with_context(|| format!("ログファイルへの書き込みに失敗しました: {}", path.display()))?;
+    writeln!(file, "{line}")
+        .with_context(|| format!("ログファイルへの書き込みに失敗しました: {}", path.display()))?;
     Ok(())
 }
 
@@ -151,5 +152,58 @@ mod tests {
         let dir = TempDir::new();
         let history = read_history(dir.path(), "nonexistent").unwrap();
         assert!(history.is_empty());
+    }
+
+    #[test]
+    fn record_serializes_stats_flattened_not_nested() {
+        // `stats` is `#[serde(flatten)]`, so the JSON line must have
+        // "attempts"/"successes"/... at the top level, not nested under a
+        // "stats" key. This is important since the README documents the
+        // flat JSONL schema as a stable, `jq`-friendly format.
+        let record = sample_record("flat-check");
+        let json = serde_json::to_string(&record).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("stats").is_none());
+        assert_eq!(value.get("attempts").and_then(|v| v.as_u64()), Some(5));
+        assert_eq!(
+            value.get("target").and_then(|v| v.as_str()),
+            Some("flat-check")
+        );
+        assert!((value["mean_latency_ms"].as_f64().unwrap() - 12.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn log_path_uses_target_name_as_filename() {
+        let dir = Path::new("/tmp/somewhere");
+        let path = log_path(dir, "cloudflare-dns");
+        assert_eq!(path, dir.join("cloudflare-dns.jsonl"));
+    }
+
+    #[test]
+    fn read_history_skips_blank_lines() {
+        let dir = TempDir::new();
+        let record = sample_record("blanks");
+        append_round(dir.path(), &record).unwrap();
+        // Manually append a blank line to the log file, then one more record.
+        let path = log_path(dir.path(), "blanks");
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(f).unwrap();
+            let line = serde_json::to_string(&record).unwrap();
+            writeln!(f, "{line}").unwrap();
+        }
+        let history = read_history(dir.path(), "blanks").unwrap();
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn read_history_rejects_malformed_json_line() {
+        let dir = TempDir::new();
+        let path = log_path(dir.path(), "broken");
+        fs::create_dir_all(dir.path()).unwrap();
+        fs::write(&path, "{not valid json\n").unwrap();
+        let result = read_history(dir.path(), "broken");
+        assert!(result.is_err());
     }
 }

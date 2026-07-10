@@ -48,11 +48,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = thread::spawn(move || {
-            for stream in listener.incoming().take(3) {
-                if let Ok(mut s) = stream {
-                    let mut buf = [0u8; 16];
-                    let _ = s.read(&mut buf);
-                }
+            for mut s in listener.incoming().take(3).flatten() {
+                let mut buf = [0u8; 16];
+                let _ = s.read(&mut buf);
             }
         });
 
@@ -83,11 +81,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let samples = 3u32;
         let handle = thread::spawn(move || {
-            for stream in listener.incoming().take(samples as usize) {
-                if let Ok(mut s) = stream {
-                    let mut buf = [0u8; 16];
-                    let _ = s.read(&mut buf);
-                }
+            for mut s in listener.incoming().take(samples as usize).flatten() {
+                let mut buf = [0u8; 16];
+                let _ = s.read(&mut buf);
             }
         });
 
