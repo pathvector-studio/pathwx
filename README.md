@@ -151,6 +151,22 @@ threshold that has to be guessed per-network.
   periodic patterns (time-of-day, day-of-week).
 - **Single process, single machine.** No distributed observation or cross-site
   correlation.
+- **JSONL logs grow without bound.** pathwx never rotates or truncates
+  `<data_dir>/<target>.jsonl` — every `probe`/`watch`/`check` round appends a line
+  forever. For a long-lived `watch` process this is an unbounded disk-usage growth
+  path; rotate or prune the file yourself (e.g. a cron job that trims to the last N
+  lines) until log rotation ships. See ROADMAP.md.
+- **The default `data_dir` (`~/.local/share/pathwx`) is shared across all configs on a
+  machine.** If you run pathwx from two different directories with two different
+  `pathwx.toml` files that happen to define targets with the *same name*, they will
+  write to and read from the same `<name>.jsonl` file and silently mix each other's
+  history. Set an explicit `data_dir` per config (or use distinct target names) to
+  avoid this footgun.
+- **Only `check`'s exit code encodes health.** `probe`, `watch`, and `report` always
+  exit `0` on success regardless of what they observe (degraded latency, loss, etc.) —
+  they're informational commands, not health gates. If you're scripting a health check
+  (CI, cron, alerting), use `check`; don't try to infer health from the exit code of
+  the other subcommands.
 
 ## License
 

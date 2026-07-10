@@ -3,9 +3,15 @@
 //! pathwx は監視対象 (target) のリストを TOML で持つ。各 target は
 //! 名前・接続先ホスト・ポート・プローブ間隔・サンプル数・タイムアウトを持つ。
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+/// `samples` に許される上限。直列プローブ (probe/mod.rs) 前提のため、
+/// 大きすぎる値は `samples × timeout_ms` の合計で1ラウンドが現実的でない
+/// 長さになる (例: 100000 × 1s ≈ 28時間) のを防ぐ。
+pub const MAX_SAMPLES: u32 = 100;
 
 /// 監視対象1件の設定
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -19,7 +25,8 @@ pub struct Target {
     /// `watch` サブコマンドでのプローブ間隔 (秒)
     #[serde(default = "default_interval_secs")]
     pub interval_secs: u64,
-    /// 1ラウンドあたりの TCP connect 試行回数
+    /// 1ラウンドあたりの TCP connect 試行回数 (上限は [`MAX_SAMPLES`]、
+    /// `Config::validate` で検証される)
     #[serde(default = "default_samples")]
     pub samples: u32,
     /// 1回の接続試行のタイムアウト (ミリ秒)
@@ -73,7 +80,41 @@ impl Config {
             .with_context(|| format!("設定ファイルを読み込めません: {}", path.display()))?;
         let cfg: Config = toml::from_str(&text)
             .with_context(|| format!("設定ファイルのパースに失敗しました: {}", path.display()))?;
+        cfg.validate()
+            .with_context(|| format!("設定ファイルの内容が不正です: {}", path.display()))?;
         Ok(cfg)
+    }
+
+    /// TOML としてパース済みの設定内容を検証する (パース自体は成功していても
+    /// 意味的に不正な組み合わせを弾く)
+    pub fn validate(&self) -> Result<()> {
+        let mut seen = HashSet::new();
+        for t in &self.targets {
+            if !seen.insert(t.name.as_str()) {
+                bail!(
+                    "ターゲット名 '{}' が重複しています。各ターゲットの `name` は一意である必要があります \
+                     (同名だと同じログファイル <name>.jsonl に2つのホストのデータが混在してしまいます)",
+                    t.name
+                );
+            }
+            if t.samples == 0 {
+                bail!(
+                    "ターゲット '{}': `samples` は1以上である必要があります (指定値: {})",
+                    t.name,
+                    t.samples
+                );
+            }
+            if t.samples > MAX_SAMPLES {
+                bail!(
+                    "ターゲット '{}': `samples` が上限 {} を超えています (指定値: {}). \
+                     probe は直列実行のため、大きすぎる値は1ラウンドが非現実的に長くなります",
+                    t.name,
+                    MAX_SAMPLES,
+                    t.samples
+                );
+            }
+        }
+        Ok(())
     }
 
     /// データディレクトリを解決する (設定 > デフォルト `~/.local/share/pathwx`)
@@ -250,5 +291,106 @@ mod tests {
         let cfg = Config::default();
         let resolved = cfg.resolve_data_dir().unwrap();
         assert!(resolved.ends_with("pathwx"));
+    }
+
+    fn target(name: &str) -> Target {
+        Target {
+            name: name.to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 80,
+            interval_secs: 60,
+            samples: 5,
+            timeout_ms: 1000,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_target_names() {
+        let cfg = Config {
+            targets: vec![target("dup"), target("dup")],
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("dup"),
+            "error should name the duplicate target: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_unique_target_names() {
+        let cfg = Config {
+            targets: vec![target("a"), target("b")],
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn load_rejects_config_with_duplicate_target_names() {
+        let toml_str = r#"
+            [[targets]]
+            name = "dup"
+            host = "127.0.0.1"
+            port = 80
+
+            [[targets]]
+            name = "dup"
+            host = "127.0.0.2"
+            port = 81
+        "#;
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "pathwx-config-dup-test-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, toml_str).unwrap();
+        let result = Config::load(&path);
+        assert!(result.is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn validate_rejects_samples_over_max() {
+        let mut t = target("t1");
+        t.samples = MAX_SAMPLES + 1;
+        let cfg = Config {
+            targets: vec![t],
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("samples"));
+    }
+
+    #[test]
+    fn validate_accepts_samples_at_max() {
+        let mut t = target("t1");
+        t.samples = MAX_SAMPLES;
+        let cfg = Config {
+            targets: vec![t],
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_samples() {
+        let mut t = target("t1");
+        t.samples = 0;
+        let cfg = Config {
+            targets: vec![t],
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn example_toml_passes_validation() {
+        let cfg: Config = toml::from_str(Config::example_toml()).unwrap();
+        assert!(cfg.validate().is_ok());
     }
 }

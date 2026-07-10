@@ -1,6 +1,6 @@
 [package]
 name = "pathwx"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "ネットワーク気象観測所 — L3経路品質の継続観測とトレンド劣化検知CLI"
 license = "MIT"

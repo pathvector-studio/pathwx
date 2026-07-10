@@ -3,6 +3,17 @@
 /// 8段階の棒グラフ文字 (低い順)
 const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// レイテンシ (ms) を人間向けに整形する。`{:.1}` 固定だとサブミリ秒
+/// (例: localhostの ~0.02ms) が "0.0" に潰れてしまうため、1ms未満は
+/// 小数点以下3桁、それ以上は1桁で表示する。
+pub fn format_latency_ms(value: f64) -> String {
+    if value.abs() < 1.0 {
+        format!("{value:.3}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
 /// 値の列から ASCII スパークラインを生成する。
 /// 全て同じ値、または空の場合は平坦な線を返す。
 pub fn sparkline(values: &[f64]) -> String {
@@ -50,5 +61,20 @@ mod tests {
         assert_eq!(chars.len(), 5);
         assert_eq!(chars[0], BLOCKS[0]);
         assert_eq!(chars[4], BLOCKS[BLOCKS.len() - 1]);
+    }
+
+    #[test]
+    fn format_latency_sub_millisecond_uses_three_decimals() {
+        // A localhost-style ~0.02ms round-trip must not be rounded away to
+        // "0.0" — that's indistinguishable from a hung/zero measurement.
+        assert_eq!(format_latency_ms(0.02), "0.020");
+        assert_eq!(format_latency_ms(0.999), "0.999");
+    }
+
+    #[test]
+    fn format_latency_millisecond_and_above_uses_one_decimal() {
+        assert_eq!(format_latency_ms(1.0), "1.0");
+        assert_eq!(format_latency_ms(12.44), "12.4");
+        assert_eq!(format_latency_ms(200.0), "200.0");
     }
 }

@@ -148,13 +148,16 @@ pub fn classify(
     }
 
     if history.len() < min_baseline_rounds {
+        let missing = min_baseline_rounds - history.len();
         return Verdict {
             health: Health::InsufficientData,
             latency_z: None,
             reason: format!(
-                "ベースライン計算に必要な履歴が不足しています ({}/{} ラウンド)",
+                "ベースライン計算に必要な履歴が不足しています ({}/{} ラウンド) \
+                 → あと{}回 `pathwx probe` を実行するか、`watch` を常駐させてください",
                 history.len(),
-                min_baseline_rounds
+                min_baseline_rounds,
+                missing
             ),
         };
     }
@@ -165,7 +168,9 @@ pub fn classify(
             return Verdict {
                 health: Health::InsufficientData,
                 latency_z: None,
-                reason: "有効なレイテンシ履歴がありません".to_string(),
+                reason: "有効なレイテンシ履歴がありません \
+                         → `pathwx probe` を実行してレイテンシ計測が成功するデータを蓄積してください"
+                    .to_string(),
             }
         }
     };
@@ -179,7 +184,10 @@ pub fn classify(
     // 大きく超えたら劣化とみなす。
     let loss_spike = latest.loss_rate > baseline.mean_loss_rate + 0.2;
 
-    let latency_spike = latency_z.map(|z| z.abs() > z_threshold).unwrap_or(false);
+    // レイテンシが「悪化」と言えるのは z が正方向 (ベースラインより遅い) に
+    // しきい値を超えたときだけ。z が大きく負 (ベースラインより明らかに速い)
+    // のは劣化ではないので Degraded に倒さない。
+    let latency_spike = latency_z.map(|z| z > z_threshold).unwrap_or(false);
 
     if loss_spike || latency_spike {
         let mut reasons = Vec::new();
@@ -202,6 +210,22 @@ pub fn classify(
             latency_z,
             reason: reasons.join(", "),
         };
+    }
+
+    // 異常に速い (z が大きく負) ラウンドは劣化ではないが、ベースラインその
+    // ものが変化した可能性があるという意味で情報提供する価値はある。
+    // Degraded 相当の深刻度ではないので Health::Healthy のまま、reason で
+    // 補足するに留める (新しい exit code / Health バリアントは追加しない)。
+    if let Some(z) = latency_z {
+        if z < -z_threshold {
+            return Verdict {
+                health: Health::Healthy,
+                latency_z,
+                reason: format!(
+                    "ベースライン範囲内です (参考: レイテンシ z-score={z:.2} — 通常より著しく高速です。ベースライン自体が変化した可能性があります)"
+                ),
+            };
+        }
     }
 
     Verdict {
@@ -293,6 +317,33 @@ mod tests {
         };
         let verdict = classify(&latest, &history, 2.0, 5);
         assert_eq!(verdict.health, Health::InsufficientData);
+    }
+
+    #[test]
+    fn classify_insufficient_data_reason_has_actionable_hint() {
+        // history has 2 rounds, min_baseline_rounds is 5 → 3 more needed.
+        // The operator should be told concretely what to do next, not just
+        // shown a bare "not enough history" message.
+        let history = stable_history(2, 20.0);
+        let latest = RoundStats {
+            attempts: 5,
+            successes: 5,
+            loss_rate: 0.0,
+            mean_latency_ms: Some(20.0),
+            jitter_ms: Some(1.0),
+        };
+        let verdict = classify(&latest, &history, 2.0, 5);
+        assert_eq!(verdict.health, Health::InsufficientData);
+        assert!(
+            verdict.reason.contains("probe") || verdict.reason.contains("watch"),
+            "expected an actionable next-step hint in reason, got: {}",
+            verdict.reason
+        );
+        assert!(
+            verdict.reason.contains('3'),
+            "expected the reason to state the exact number of missing rounds (3), got: {}",
+            verdict.reason
+        );
     }
 
     #[test]
@@ -443,6 +494,64 @@ mod tests {
             z > 0.0,
             "expected positive z-score for a latency spike, got {z}"
         );
+    }
+
+    #[test]
+    fn classify_anomalously_fast_round_is_not_degraded() {
+        // A round that is much *faster* than baseline (large negative z) must
+        // never be classified as Degraded — that would be a false alarm.
+        let mut history = stable_history(15, 20.0);
+        for (i, h) in history.iter_mut().enumerate() {
+            h.mean_latency_ms = Some(20.0 + (i % 3) as f64 - 1.0); // 19-21ms noise
+        }
+        let latest = RoundStats {
+            attempts: 5,
+            successes: 5,
+            loss_rate: 0.0,
+            mean_latency_ms: Some(1.0), // dramatically faster than baseline
+            jitter_ms: Some(0.1),
+        };
+        let verdict = classify(&latest, &history, 2.0, 5);
+        assert_ne!(verdict.health, Health::Degraded);
+        assert_eq!(verdict.health, Health::Healthy);
+        let z = verdict.latency_z.expect("z-score must be present");
+        assert!(z < 0.0, "expected negative z-score, got {z}");
+        // The reason should still surface the anomaly for the operator, even
+        // though the verdict is Healthy.
+        assert!(
+            verdict.reason.contains("z-score"),
+            "expected fast-anomaly note in reason, got: {}",
+            verdict.reason
+        );
+    }
+
+    #[test]
+    fn classify_only_positive_z_beyond_threshold_is_degraded() {
+        // Directly exercise the z=-10 style regression: a huge negative z
+        // (much faster than baseline) must not trip the Degraded branch that
+        // a naive `.abs() > threshold` check would trigger.
+        let baseline_mean = 50.0;
+        let baseline_stddev = 5.0;
+        let mut history = stable_history(10, baseline_mean);
+        for h in history.iter_mut() {
+            h.jitter_ms = Some(baseline_stddev);
+        }
+        // Craft history whose stddev is close to baseline_stddev by adding
+        // symmetric spread.
+        for (i, h) in history.iter_mut().enumerate() {
+            h.mean_latency_ms = Some(baseline_mean + if i % 2 == 0 { 5.0 } else { -5.0 });
+        }
+        let latest = RoundStats {
+            attempts: 5,
+            successes: 5,
+            loss_rate: 0.0,
+            mean_latency_ms: Some(baseline_mean - 10.0 * baseline_stddev), // z ~ -10
+            jitter_ms: Some(0.5),
+        };
+        let verdict = classify(&latest, &history, 2.0, 5);
+        assert_eq!(verdict.health, Health::Healthy);
+        let z = verdict.latency_z.expect("z-score must be present");
+        assert!(z < -2.0, "expected strongly negative z, got {z}");
     }
 
     #[test]

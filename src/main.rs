@@ -7,7 +7,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use pathwx::config::Config;
 use pathwx::probe;
-use pathwx::report::sparkline;
+use pathwx::report::{format_latency_ms, sparkline};
 use pathwx::stats::{classify, Baseline, Health, RoundStats};
 use pathwx::storage::{append_round, read_history, RoundRecord};
 use std::path::{Path, PathBuf};
@@ -135,7 +135,7 @@ fn cmd_probe(config_path: &Path) -> Result<ExitCode> {
             record
                 .stats
                 .mean_latency_ms
-                .map(|v| format!("{v:.1}"))
+                .map(format_latency_ms)
                 .unwrap_or_else(|| "-".to_string())
         );
     }
@@ -163,7 +163,7 @@ fn cmd_watch(config_path: &Path, max_rounds: Option<u64>) -> Result<ExitCode> {
                 record
                     .stats
                     .mean_latency_ms
-                    .map(|v| format!("{v:.1}ms"))
+                    .map(|v| format!("{}ms", format_latency_ms(v)))
                     .unwrap_or_else(|| "-".to_string())
             );
         }
@@ -235,7 +235,7 @@ fn cmd_check(config_path: &Path, target_name: Option<&str>) -> Result<ExitCode> 
             record
                 .stats
                 .mean_latency_ms
-                .map(|v| format!("{v:.1}ms"))
+                .map(|v| format!("{}ms", format_latency_ms(v)))
                 .unwrap_or_else(|| "-".to_string()),
             verdict.reason
         );
@@ -255,7 +255,16 @@ fn cmd_report(config_path: &Path, target_name: &str, window: usize) -> Result<Ex
     }
 
     let history_stats: Vec<RoundStats> = history.iter().map(|r| r.stats.clone()).collect();
-    let baseline = Baseline::from_history(&history_stats);
+    // 判定 (この下の「直近ラウンドの判定」) は直近ラウンドを除いた履歴を
+    // ベースラインとして使う (check と同じロジック)。表示するベースラインも
+    // 同じものにしないと、画面上に2つの異なるベースラインが出て矛盾するため
+    // (直近ラウンドを含む全履歴 vs 直近を除いた履歴)、ここでは常に
+    // split_last() 後の `rest` から計算する。
+    let baseline_history: &[RoundStats] = match history_stats.split_last() {
+        Some((_, rest)) => rest,
+        None => &history_stats,
+    };
+    let baseline = Baseline::from_history(baseline_history);
 
     println!("=== pathwx report: {target_name} ===");
     println!("総ラウンド数: {}", history.len());
@@ -263,14 +272,14 @@ fn cmd_report(config_path: &Path, target_name: &str, window: usize) -> Result<Ex
     match &baseline {
         Some(b) => {
             println!(
-                "ベースライン (全{}ラウンド): 平均レイテンシ={:.2}ms 標準偏差={:.2}ms 平均損失率={:.1}%",
+                "ベースライン (直近を除く{}ラウンド): 平均レイテンシ={}ms 標準偏差={}ms 平均損失率={:.1}%",
                 b.sample_rounds,
-                b.mean_latency_ms,
-                b.stddev_latency_ms,
+                format_latency_ms(b.mean_latency_ms),
+                format_latency_ms(b.stddev_latency_ms),
                 b.mean_loss_rate * 100.0
             );
         }
-        None => println!("ベースライン: 有効なレイテンシ履歴がありません"),
+        None => println!("ベースライン: 有効なレイテンシ履歴がありません (直近ラウンドを除く)"),
     }
 
     let recent: Vec<&RoundRecord> = history.iter().rev().take(window).rev().collect();
@@ -285,7 +294,11 @@ fn cmd_report(config_path: &Path, target_name: &str, window: usize) -> Result<Ex
         sparkline(&recent_latencies)
     );
     if let (Some(first), Some(last)) = (recent_latencies.first(), recent_latencies.last()) {
-        println!("  先頭={first:.1}ms 末尾={last:.1}ms");
+        println!(
+            "  先頭={}ms 末尾={}ms",
+            format_latency_ms(*first),
+            format_latency_ms(*last)
+        );
     }
 
     // 直近ラウンドの判定 (残りの履歴をベースラインとして使う)
