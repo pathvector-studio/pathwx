@@ -2,6 +2,8 @@
 
 English | [日本語](README.ja.md)
 
+> **Status: experimental.** This is a working prototype and is not under active development right now. It does what this README describes, but expect rough edges. Issues and feedback are welcome.
+
 **This tool doesn't ask "is it broken?" — it asks "is it getting worse?"**
 
 pathwx (path + the aviation-weather "wx") repeatedly probes TCP connect quality to a
